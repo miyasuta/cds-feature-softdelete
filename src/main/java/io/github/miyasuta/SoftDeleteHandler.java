@@ -80,7 +80,12 @@ public class SoftDeleteHandler implements EventHandler {
         // Extract keys from the DELETE CQN using CqnAnalyzer
         CqnAnalyzer analyzer = CqnAnalyzer.create(model);
         AnalysisResult analysisResult = analyzer.analyze(context.getCqn());
-        Map<String, Object> keys = analysisResult.rootKeys();
+        Map<String, Object> keys = new HashMap<>(analysisResult.rootKeys());
+
+        // Remove draft-specific fields that don't exist in database entities
+        keys.remove("IsActiveEntity");
+        keys.remove("HasActiveEntity");
+        keys.remove("HasDraftEntity");
 
         logger.info("Extracted keys for soft delete: {}", keys);
 
@@ -216,7 +221,12 @@ public class SoftDeleteHandler implements EventHandler {
             CdsModel model = context.getModel();
             CqnAnalyzer analyzer = CqnAnalyzer.create(model);
             AnalysisResult analysisResult = analyzer.analyze(select.ref());
-            Map<String, Object> keys = analysisResult.rootKeys();
+            Map<String, Object> keys = new HashMap<>(analysisResult.rootKeys());
+
+            // Remove draft-specific fields that don't exist in database entities
+            keys.remove("IsActiveEntity");
+            keys.remove("HasActiveEntity");
+            keys.remove("HasDraftEntity");
 
             if (keys.isEmpty()) {
                 return false; // Default to false if no keys found

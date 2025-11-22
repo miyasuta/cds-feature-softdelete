@@ -12,6 +12,6 @@ public class RuntimeConfiguration implements CdsRuntimeConfiguration{
     @Override
     public void eventHandlers(CdsRuntimeConfigurer configurer) {
         configurer.eventHandler(new SoftDeleteHandler());
-        logger.info("[cds-feature-softdelete] SoftDeleteHandler successfully registered ✅");
+        logger.info("[cds-feature-softdelete] SoftDeleteHandler successfully registered 5:29 ✅");
     }
 }

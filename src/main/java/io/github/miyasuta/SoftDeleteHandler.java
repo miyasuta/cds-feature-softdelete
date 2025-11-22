@@ -113,7 +113,7 @@ public class SoftDeleteHandler implements EventHandler {
         logger.info("Soft delete UPDATE executed, affected rows: {}", result.rowCount());
 
         // Cascade soft delete to composition children
-        softDeleteCompositionChildren(context, targetEntity, context.getCqn().where().orElse(null), deletionData);
+        softDeleteCompositionChildren(context, targetEntity, keys, deletionData);
 
         // Mark the event as completed and set result with affected row count (HTTP 204)
         long rowCount = result.rowCount();
@@ -385,10 +385,15 @@ public class SoftDeleteHandler implements EventHandler {
 
     /**
      * Recursively soft deletes composition children of a given entity.
+     * @param context The delete event context
+     * @param entity The parent entity
+     * @param parentKeys The key values of the parent entity
+     * @param deletionData The deletion metadata (isDeleted, deletedAt, deletedBy)
      */
     private void softDeleteCompositionChildren(CdsDeleteEventContext context, CdsEntity entity,
-                                               CqnPredicate parentKeys, Map<String, Object> deletionData) {
+                                               Map<String, Object> parentKeys, Map<String, Object> deletionData) {
         List<CdsElement> compositionElements = getCompositionElements(entity);
+        PersistenceService db = context.getServiceCatalog().getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
 
         for (CdsElement element : compositionElements) {
             CdsAssociationType assocType = (CdsAssociationType) element.getType();
@@ -412,24 +417,97 @@ public class SoftDeleteHandler implements EventHandler {
                     }
                 }
 
-                // Build update for composition children
-                // Note: This updates ALL children without WHERE clause - needs improvement
-                // to only update children related to the deleted parent
-                CqnUpdate childUpdate = Update.entity(childDbEntityName)
-                    .data(deletionData);
+                // Extract foreign key name from the composition's on clause
+                String foreignKeyName = extractForeignKeyName(element, parentKeys);
+                if (foreignKeyName == null) {
+                    logger.warn("Could not determine foreign key for composition '{}', skipping cascade",
+                        element.getName());
+                    continue;
+                }
 
-                // Execute the update using PersistenceService
-                PersistenceService db = context.getServiceCatalog().getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
+                // Get the parent key value (assuming single key for simplicity)
+                Object parentKeyValue = parentKeys.values().iterator().next();
+
+                // First, query children to get their keys for recursive cascade
+                CqnSelect childSelect = Select.from(childDbEntityName)
+                    .where(CQL.get(foreignKeyName).eq(parentKeyValue));
+                Result childrenResult = db.run(childSelect);
+
+                // Update children with soft delete data
+                CqnUpdate childUpdate = Update.entity(childDbEntityName)
+                    .data(deletionData)
+                    .where(CQL.get(foreignKeyName).eq(parentKeyValue));
+
                 db.run(childUpdate);
 
-                // Recursively handle nested compositions
-                softDeleteCompositionChildren(context, childEntity, null, deletionData);
+                // Recursively handle nested compositions for each child
+                for (var child : childrenResult) {
+                    // Extract child's keys (excluding draft virtual keys)
+                    Map<String, Object> childKeys = new HashMap<>();
+                    for (String keyName : getEntityKeyNames(childEntity)) {
+                        Object keyValue = child.get(keyName);
+                        if (keyValue != null) {
+                            childKeys.put(keyName, keyValue);
+                        }
+                    }
+
+                    if (!childKeys.isEmpty()) {
+                        softDeleteCompositionChildren(context, childEntity, childKeys, deletionData);
+                    }
+                }
 
             } catch (Exception e) {
                 logger.warn("Failed to cascade soft delete to child entity '{}': {}",
                     childEntity.getQualifiedName(), e.getMessage());
             }
         }
+    }
+
+    /**
+     * Extracts the foreign key name from a composition element.
+     * For example, for composition "items" pointing to OrderItems with back-association "order",
+     * it extracts "order_ID".
+     */
+    private String extractForeignKeyName(CdsElement element, Map<String, Object> parentKeys) {
+        CdsAssociationType assocType = (CdsAssociationType) element.getType();
+        CdsEntity targetEntity = assocType.getTarget();
+
+        // Find the back-association in the target entity that points to the parent
+        String associationName = null;
+        for (var targetElement : targetEntity.elements().collect(Collectors.toList())) {
+            if (targetElement.getType().isAssociation()) {
+                CdsAssociationType targetAssocType = (CdsAssociationType) targetElement.getType();
+                // Check if this association points back to parent entity
+                String parentEntityName = element.getDeclaringType().getQualifiedName();
+                String targetOfTarget = targetAssocType.getTarget().getQualifiedName();
+
+                if (targetOfTarget.equals(parentEntityName)) {
+                    associationName = targetElement.getName();
+                    break;
+                }
+            }
+        }
+
+        if (associationName == null) {
+            return null;
+        }
+
+        // Build foreign key name: [associationName]_[parentKeyName]
+        String parentKeyName = parentKeys.keySet().iterator().next();
+        return associationName + "_" + parentKeyName;
+    }
+
+    /**
+     * Gets the key names of an entity, excluding draft virtual keys.
+     */
+    private List<String> getEntityKeyNames(CdsEntity entity) {
+        List<String> draftVirtualKeys = Arrays.asList("IsActiveEntity", "HasActiveEntity", "HasDraftEntity");
+
+        return entity.elements()
+            .filter(CdsElement::isKey)
+            .map(CdsElement::getName)
+            .filter(keyName -> !draftVirtualKeys.contains(keyName))
+            .collect(Collectors.toList());
     }
 
     /**

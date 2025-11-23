@@ -43,6 +43,7 @@ public class SoftDeleteHandler implements EventHandler {
     private static final String FIELD_IS_DELETED = "isDeleted";
     private static final String FIELD_DELETED_AT = "deletedAt";
     private static final String FIELD_DELETED_BY = "deletedBy";
+    private static final List<String> DRAFT_VIRTUAL_KEYS = Arrays.asList("IsActiveEntity", "HasActiveEntity", "HasDraftEntity");
 
     /**
      * Intercepts DELETE operations and converts them to UPDATE operations that set soft delete fields.
@@ -54,16 +55,12 @@ public class SoftDeleteHandler implements EventHandler {
         CdsModel model = context.getModel();
         CdsEntity targetEntity = model.getEntity(context.getTarget().getQualifiedName());
 
-        logger.info("onDelete called for entity: {}", context.getTarget().getQualifiedName());
-
         if (!isSoftDeleteEnabled(targetEntity)) {
-            // Let the default DELETE handler proceed
-            logger.info("Entity not soft-delete enabled, proceeding with normal DELETE");
             context.proceed();
             return;
         }
 
-        logger.info("Intercepting DELETE for soft-delete enabled entity: {}", targetEntity.getQualifiedName());
+        logger.debug("Soft delete triggered for entity: {}", targetEntity.getQualifiedName());
 
         // Prepare soft delete data
         Instant now = Instant.now();
@@ -81,53 +78,27 @@ public class SoftDeleteHandler implements EventHandler {
         CqnAnalyzer analyzer = CqnAnalyzer.create(model);
         AnalysisResult analysisResult = analyzer.analyze(context.getCqn());
         Map<String, Object> keys = new HashMap<>(analysisResult.rootKeys());
-
-        // Remove draft-specific fields that don't exist in database entities
-        keys.remove("IsActiveEntity");
-        keys.remove("HasActiveEntity");
-        keys.remove("HasDraftEntity");
-
-        logger.info("Extracted keys for soft delete: {}", keys);
+        removeDraftKeys(keys);
 
         // Get the underlying database entity name from the service entity
-        String dbEntityName = targetEntity.getQualifiedName();
-        // If this is a projection, get the source entity
-        if (targetEntity.query().isPresent()) {
-            String source = targetEntity.query().get().ref().firstSegment();
-            if (source != null) {
-                dbEntityName = source;
-            }
-        }
-        logger.info("Database entity name: {}", dbEntityName);
+        String dbEntityName = getDbEntityName(targetEntity);
 
         // Convert DELETE to UPDATE using extracted keys
         CqnUpdate update = Update.entity(dbEntityName)
             .data(deletionData)
             .matching(keys);
 
-        logger.info("Executing soft delete UPDATE: {}", update);
-
         // Use PersistenceService to run the update directly on the database
         PersistenceService db = context.getServiceCatalog().getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
         Result result = db.run(update);
-        logger.info("Soft delete UPDATE executed, affected rows: {}", result.rowCount());
 
         // Cascade soft delete to composition children
         softDeleteCompositionChildren(context, targetEntity, keys, deletionData);
 
         // Mark the event as completed and set result with affected row count (HTTP 204)
-        long rowCount = result.rowCount();
-        context.setResult(ResultBuilder.deletedRows((int) rowCount).result());
-        logger.info("onDelete end, affected rows: {}", rowCount);
+        context.setResult(ResultBuilder.deletedRows((int) result.rowCount()).result());
         context.setCompleted();
     }
-
-    @On(event = CqnService.EVENT_DELETE)
-    @HandlerOrder(HandlerOrder.LATE)
-    public void debugLast(CdsDeleteEventContext ctx) {
-        logger.warn("LAST DELETE handler reached (should NOT happen)");
-    }
-
 
     /**
      * Automatically adds isDeleted = false filter to READ operations on soft-delete enabled entities.
@@ -145,33 +116,23 @@ public class SoftDeleteHandler implements EventHandler {
         CdsEntity entity = model.getEntity(targetName);
 
         if (entity == null || !isSoftDeleteEnabled(entity)) {
-            // Not a soft-delete enabled entity, proceed normally
             return;
         }
 
-        logger.info("beforeRead called for entity: {}", targetName);
-        logger.debug("Applying soft delete filter to READ for entity: {}", targetName);
+        logger.debug("Applying soft delete filter for entity: {}", targetName);
 
         // Check if this is by-key access (skip main entity filtering for direct key access)
-        boolean isByKeyAccess = isByKeyAccess(select, model);
-        if (isByKeyAccess) {
-            logger.debug("By-key access detected, skipping main entity filter but still processing expands");
-        }
+        boolean isByKeyAccess = isByKeyAccess(select);
 
         // Check if user already specified isDeleted filter and get its value
         Boolean userIsDeletedValue = getIsDeletedValueFromWhere(select);
         boolean userSpecifiedIsDeleted = userIsDeletedValue != null;
-        if (userSpecifiedIsDeleted) {
-            logger.debug("User specified isDeleted filter with value: {}", userIsDeletedValue);
-        }
 
         // Determine the isDeleted value to use for expand filters
-        Boolean expandIsDeletedValue = null;
+        Boolean expandIsDeletedValue;
 
         if (isByKeyAccess) {
-            // For by-key access, we need to check the parent's actual isDeleted value
             expandIsDeletedValue = getParentIsDeletedValue(context, select, entity);
-            logger.debug("Parent isDeleted value for by-key access: {}", expandIsDeletedValue);
         } else if (userSpecifiedIsDeleted) {
             // User specified isDeleted filter, propagate that value to expands
             expandIsDeletedValue = userIsDeletedValue;
@@ -222,24 +183,13 @@ public class SoftDeleteHandler implements EventHandler {
             CqnAnalyzer analyzer = CqnAnalyzer.create(model);
             AnalysisResult analysisResult = analyzer.analyze(select.ref());
             Map<String, Object> keys = new HashMap<>(analysisResult.rootKeys());
-
-            // Remove draft-specific fields that don't exist in database entities
-            keys.remove("IsActiveEntity");
-            keys.remove("HasActiveEntity");
-            keys.remove("HasDraftEntity");
+            removeDraftKeys(keys);
 
             if (keys.isEmpty()) {
-                return false; // Default to false if no keys found
+                return false;
             }
 
-            // Get the database entity name
-            String dbEntityName = entity.getQualifiedName();
-            if (entity.query().isPresent()) {
-                String source = entity.query().get().ref().firstSegment();
-                if (source != null) {
-                    dbEntityName = source;
-                }
-            }
+            String dbEntityName = getDbEntityName(entity);
 
             // Query the parent's isDeleted value
             CqnSelect parentQuery = Select.from(dbEntityName)
@@ -341,31 +291,22 @@ public class SoftDeleteHandler implements EventHandler {
 
         // Build the filter
         CqnPredicate existingFilter = expand.ref().targetSegment().filter().orElse(null);
-        CqnPredicate newFilter = existingFilter;
+        Predicate newFilter = existingFilter != null ? (Predicate) existingFilter : null;
 
         if (needsSoftDeleteFilter && expandIsDeletedValue != null) {
             Predicate softDeleteFilter = CQL.get(FIELD_IS_DELETED).eq(expandIsDeletedValue);
-            newFilter = existingFilter != null
-                ? CQL.and((Predicate) existingFilter, softDeleteFilter)
-                : softDeleteFilter;
+            newFilter = newFilter != null ? CQL.and(newFilter, softDeleteFilter) : softDeleteFilter;
         }
 
         // Create new expand using CQL.to().expand()
-        if (nestedItems.isEmpty()) {
-            if (newFilter != null) {
-                return CQL.to(associationName).filter((Predicate) newFilter).expand();
-            } else {
-                return CQL.to(associationName).expand();
-            }
-        } else {
-            if (newFilter != null) {
-                return CQL.to(associationName).filter((Predicate) newFilter)
-                    .expand(nestedItems.toArray(new CqnSelectListItem[0]));
-            } else {
-                return CQL.to(associationName)
-                    .expand(nestedItems.toArray(new CqnSelectListItem[0]));
-            }
+        var toExpand = CQL.to(associationName);
+        if (newFilter != null) {
+            toExpand = toExpand.filter(newFilter);
         }
+
+        return nestedItems.isEmpty()
+            ? toExpand.expand()
+            : toExpand.expand(nestedItems.toArray(new CqnSelectListItem[0]));
     }
 
     /**
@@ -400,22 +341,11 @@ public class SoftDeleteHandler implements EventHandler {
             CdsEntity childEntity = assocType.getTarget();
 
             if (!isSoftDeleteEnabled(childEntity)) {
-                logger.debug("Composition child '{}' is not soft-delete enabled, skipping",
-                    childEntity.getQualifiedName());
                 continue;
             }
 
-            logger.debug("Cascading soft delete to composition child: {}", childEntity.getQualifiedName());
-
             try {
-                // Get the underlying database entity name for the child
-                String childDbEntityName = childEntity.getQualifiedName();
-                if (childEntity.query().isPresent()) {
-                    String source = childEntity.query().get().ref().firstSegment();
-                    if (source != null) {
-                        childDbEntityName = source;
-                    }
-                }
+                String childDbEntityName = getDbEntityName(childEntity);
 
                 // Extract foreign key name from the composition's on clause
                 String foreignKeyName = extractForeignKeyName(element, parentKeys);
@@ -501,12 +431,10 @@ public class SoftDeleteHandler implements EventHandler {
      * Gets the key names of an entity, excluding draft virtual keys.
      */
     private List<String> getEntityKeyNames(CdsEntity entity) {
-        List<String> draftVirtualKeys = Arrays.asList("IsActiveEntity", "HasActiveEntity", "HasDraftEntity");
-
         return entity.elements()
             .filter(CdsElement::isKey)
             .map(CdsElement::getName)
-            .filter(keyName -> !draftVirtualKeys.contains(keyName))
+            .filter(keyName -> !DRAFT_VIRTUAL_KEYS.contains(keyName))
             .collect(Collectors.toList());
     }
 
@@ -536,26 +464,29 @@ public class SoftDeleteHandler implements EventHandler {
 
     /**
      * Checks if a query is a by-key access (direct access using primary keys).
-     * By-key access should not be filtered to allow direct access to soft-deleted entities.
-     *
-     * Key access: GET /Books(1001) - filter is on the ref segment (from.ref[0].where in Node.js)
-     * Filter query: GET /Books?$filter=ID eq 1001 - filter is in WHERE clause
      */
-    private boolean isByKeyAccess(CqnSelect select, CdsModel model) {
-        // Check if the ref has a filter on the root segment (indicates by-key access like /Books(1001))
-        // This is equivalent to checking from.ref[0].where in Node.js
-        boolean result = select.ref().rootSegment().filter().isPresent();
-        logger.debug("isByKeyAccess check: rootSegment filter present = {}", result);
-        return result;
+    private boolean isByKeyAccess(CqnSelect select) {
+        return select.ref().rootSegment().filter().isPresent();
     }
 
     /**
-     * Checks if a WHERE clause already contains a reference to isDeleted field.
+     * Removes draft-specific virtual keys from a map.
      */
-    private boolean hasIsDeletedInWhere(CqnPredicate predicate) {
-        // This is a simplified implementation
-        // A complete implementation would recursively traverse the predicate tree
-        String predicateString = predicate.toString();
-        return predicateString.contains(FIELD_IS_DELETED);
+    private void removeDraftKeys(Map<String, Object> keys) {
+        DRAFT_VIRTUAL_KEYS.forEach(keys::remove);
     }
+
+    /**
+     * Gets the underlying database entity name from a service entity.
+     */
+    private String getDbEntityName(CdsEntity entity) {
+        if (entity.query().isPresent()) {
+            String source = entity.query().get().ref().firstSegment();
+            if (source != null) {
+                return source;
+            }
+        }
+        return entity.getQualifiedName();
+    }
+
 }

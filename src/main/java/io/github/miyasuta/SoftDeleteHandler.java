@@ -40,6 +40,7 @@ public class SoftDeleteHandler implements EventHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(SoftDeleteHandler.class);
     private static final String ANNOTATION_SOFTDELETE_ENABLED = "@softdelete.enabled";
+    private static final String ANNOTATION_DRAFT_ENABLED = "@odata.draft.enabled";
     private static final String FIELD_IS_DELETED = "isDeleted";
     private static final String FIELD_DELETED_AT = "deletedAt";
     private static final String FIELD_DELETED_BY = "deletedBy";
@@ -54,6 +55,12 @@ public class SoftDeleteHandler implements EventHandler {
     public void onDelete(CdsDeleteEventContext context) {
         CdsModel model = context.getModel();
         CdsEntity targetEntity = model.getEntity(context.getTarget().getQualifiedName());
+
+        // Check if this is a draft entity deletion
+        if (isDraftEntity(targetEntity)) {
+            handleDraftEntityDelete(context, model, targetEntity);
+            return;
+        }
 
         if (!isSoftDeleteEnabled(targetEntity)) {
             context.proceed();
@@ -105,6 +112,7 @@ public class SoftDeleteHandler implements EventHandler {
      * Skips filtering if:
      * - User explicitly specified isDeleted in their query
      * - Query is a by-key access (direct access to single entity)
+     * - Entity is a draft entity (ends with .drafts suffix)
      */
     @Before(event = CqnService.EVENT_READ)
     public void beforeRead(CdsReadEventContext context) {
@@ -114,6 +122,12 @@ public class SoftDeleteHandler implements EventHandler {
         CdsModel model = context.getModel();
         String targetName = context.getTarget().getQualifiedName();
         CdsEntity entity = model.getEntity(targetName);
+
+        // Skip filtering for draft entities (CAP draft activation needs to read soft-deleted draft records)
+        if (isDraftEntity(entity)) {
+            logger.debug("Skipping isDeleted filter for draft entity: {}", targetName);
+            return;
+        }
 
         if (entity == null || !isSoftDeleteEnabled(entity)) {
             return;
@@ -487,6 +501,156 @@ public class SoftDeleteHandler implements EventHandler {
             }
         }
         return entity.getQualifiedName();
+    }
+
+    /**
+     * Checks if an entity is a draft-enabled entity (has IsActiveEntity key).
+     * In CAP Java, draft entities are identified by the IsActiveEntity virtual key,
+     * not by a .drafts suffix like in Node.js.
+     */
+    private boolean isDraftEntity(CdsEntity entity) {
+        if (entity == null) {
+            return false;
+        }
+        // Check if entity has IsActiveEntity key (indicates draft-enabled entity)
+        return entity.elements()
+            .filter(CdsElement::isKey)
+            .anyMatch(element -> "IsActiveEntity".equals(element.getName()));
+    }
+
+    /**
+     * Handles DELETE operations on draft entities.
+     * Converts physical delete to soft delete by updating draft entity with soft delete fields.
+     * In CAP Java, draft entities are the same entity with IsActiveEntity=false.
+     */
+    private void handleDraftEntityDelete(CdsDeleteEventContext context, CdsModel model, CdsEntity draftEntity) {
+        // Check if the entity is soft-delete enabled
+        if (!isSoftDeleteEnabled(draftEntity)) {
+            context.proceed();
+            return;
+        }
+
+        logger.debug("Soft delete triggered for draft-enabled entity: {}", draftEntity.getQualifiedName());
+
+        // Prepare soft delete data
+        Instant now = Instant.now();
+        String userName = context.getUserInfo().getName();
+        if (userName == null || userName.isEmpty()) {
+            userName = "system";
+        }
+
+        Map<String, Object> deletionData = new HashMap<>();
+        deletionData.put(FIELD_IS_DELETED, true);
+        deletionData.put(FIELD_DELETED_AT, now);
+        deletionData.put(FIELD_DELETED_BY, userName);
+
+        // Extract keys from the DELETE CQN using CqnAnalyzer
+        CqnAnalyzer analyzer = CqnAnalyzer.create(model);
+        AnalysisResult analysisResult = analyzer.analyze(context.getCqn());
+        Map<String, Object> keys = new HashMap<>(analysisResult.rootKeys());
+
+        // Filter keys to only include those that belong to the entity (exclude parent keys in navigation path)
+        Map<String, Object> filteredKeys = filterKeysForEntity(keys, draftEntity);
+
+        // Convert DELETE to UPDATE using filtered keys
+        CqnUpdate update = Update.entity(draftEntity.getQualifiedName())
+            .data(deletionData)
+            .matching(filteredKeys);
+
+        // Use PersistenceService to run the update directly on the database
+        PersistenceService db = context.getServiceCatalog().getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
+        db.run(update);
+
+        // Cascade soft delete to composition children of the draft entity
+        softDeleteDraftCompositionChildren(context, draftEntity, filteredKeys, deletionData);
+
+        // Mark the event as completed and return 0 to prevent physical delete
+        context.setResult(ResultBuilder.deletedRows(0).result());
+        context.setCompleted();
+    }
+
+    /**
+     * Filters keys to only include those that belong to the target entity.
+     * This is important for navigation path deletions (e.g., Orders(...)/items(...))
+     * where keys contain both parent and child entity keys.
+     */
+    private Map<String, Object> filterKeysForEntity(Map<String, Object> keys, CdsEntity entity) {
+        Map<String, Object> filtered = new HashMap<>();
+        List<String> entityKeyNames = getEntityKeyNames(entity);
+
+        for (Map.Entry<String, Object> entry : keys.entrySet()) {
+            if (entityKeyNames.contains(entry.getKey())) {
+                filtered.put(entry.getKey(), entry.getValue());
+            }
+        }
+
+        return filtered;
+    }
+
+    /**
+     * Recursively soft deletes composition children of a draft entity.
+     */
+    private void softDeleteDraftCompositionChildren(CdsDeleteEventContext context, CdsEntity entity,
+                                                     Map<String, Object> parentKeys, Map<String, Object> deletionData) {
+        List<CdsElement> compositionElements = getCompositionElements(entity);
+        PersistenceService db = context.getServiceCatalog().getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
+
+        for (CdsElement element : compositionElements) {
+            CdsAssociationType assocType = (CdsAssociationType) element.getType();
+            CdsEntity childEntity = assocType.getTarget();
+
+            // Check if the child entity is soft-delete enabled
+            if (!isSoftDeleteEnabled(childEntity)) {
+                continue;
+            }
+
+            try {
+                String childDbEntityName = childEntity.getQualifiedName();
+
+                // Extract foreign key name from the composition's on clause
+                String foreignKeyName = extractForeignKeyName(element, parentKeys);
+                if (foreignKeyName == null) {
+                    logger.warn("Could not determine foreign key for composition '{}', skipping cascade",
+                        element.getName());
+                    continue;
+                }
+
+                // Get the parent key value (assuming single key for simplicity)
+                Object parentKeyValue = parentKeys.values().iterator().next();
+
+                // First, query children to get their keys for recursive cascade
+                CqnSelect childSelect = Select.from(childDbEntityName)
+                    .where(CQL.get(foreignKeyName).eq(parentKeyValue));
+                Result childrenResult = db.run(childSelect);
+
+                // Update children with soft delete data
+                CqnUpdate childUpdate = Update.entity(childDbEntityName)
+                    .data(deletionData)
+                    .where(CQL.get(foreignKeyName).eq(parentKeyValue));
+
+                db.run(childUpdate);
+
+                // Recursively handle nested compositions for each child
+                for (var child : childrenResult) {
+                    // Extract child's keys (excluding draft virtual keys)
+                    Map<String, Object> childKeys = new HashMap<>();
+                    for (String keyName : getEntityKeyNames(childEntity)) {
+                        Object keyValue = child.get(keyName);
+                        if (keyValue != null) {
+                            childKeys.put(keyName, keyValue);
+                        }
+                    }
+
+                    if (!childKeys.isEmpty()) {
+                        softDeleteDraftCompositionChildren(context, childEntity, childKeys, deletionData);
+                    }
+                }
+
+            } catch (Exception e) {
+                logger.warn("Failed to cascade soft delete to draft child entity '{}': {}",
+                    childEntity.getQualifiedName(), e.getMessage());
+            }
+        }
     }
 
 }

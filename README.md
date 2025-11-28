@@ -49,6 +49,41 @@ The `softdelete` aspect adds the following fields:
 - `deletedAt`: DateTime - Deletion timestamp
 - `deletedBy`: String - User ID who deleted the record
 
+**Important: Field Annotations**
+
+The soft delete fields should **NOT** have any restrictive annotations such as `@readonly`, `@Core.Immutable`, or `@Common.FieldControl: #ReadOnly`. These annotations prevent CAP's draft activation process from properly copying the soft delete status from draft entities to active entities.
+
+To prevent users from modifying these fields in the UI while allowing internal operations:
+
+1. **Recommended**: Use `@UI.Hidden` to hide the fields from the UI entirely
+   ```cds
+   entity Orders: softdelete {
+     key ID : UUID;
+     // Soft delete fields are inherited from aspect
+     // Apply UI.Hidden in the service definition:
+   }
+   ```
+
+2. **In Service Definition**: Add UI annotations to hide fields
+   ```cds
+   service OrderService {
+     @softdelete.enabled
+     entity Orders as projection on my.Orders {
+       *,
+       isDeleted @UI.Hidden,
+       deletedAt @UI.Hidden,
+       deletedBy @UI.Hidden
+     };
+   }
+   ```
+
+3. **Alternative**: Implement custom validation in an `@Before(event = UPDATE)` handler to reject unauthorized changes to these fields
+
+**Do NOT use**:
+- `@readonly` - Blocks draft activation from copying fields
+- `@Core.Immutable` - May cause issues with draft handling
+- `@Common.FieldControl: #ReadOnly` - Also blocks draft activation
+
 ### 2. Service Definition
 
 Add the `@softdelete.enabled` annotation to **all entities** that should support soft delete.
@@ -188,15 +223,46 @@ DELETE /OrderItems(item-id)
 
 The parent entity is not affected when a child is deleted directly.
 
+## Draft Support
+
+The plugin fully supports SAP Fiori draft mode for entities with `@odata.draft.enabled`.
+
+### Draft Behavior
+
+When deleting entities in draft edit mode:
+
+```javascript
+// 1. Create a draft of an Order
+POST /Orders(ID=...,IsActiveEntity=false)/OrderDraftService.draftEdit
+
+// 2. Delete an OrderItem in draft mode (navigation path)
+DELETE /Orders(ID=parent-id,IsActiveEntity=false)/items(ID=item-id,IsActiveEntity=false)
+// ↓ Soft delete is applied to the draft entity
+// UPDATE OrderItems_drafts SET isDeleted = true, ...
+// WHERE ID = 'item-id' AND IsActiveEntity = false
+
+// 3. Activate the draft
+POST /Orders(ID=parent-id,IsActiveEntity=false)/OrderDraftService.draftActivate
+// ↓ The soft delete status (isDeleted=true) is copied to the active entity
+// Active OrderItem now has isDeleted = true
+```
+
+**Key Points**:
+- Draft deletion properly sets `isDeleted=true` on draft entities (`_drafts` tables)
+- Draft activation correctly copies soft delete fields to active entities
+- Cascade deletion works through composition children in draft mode
+- Draft discard operations do not affect active entities
+
+**Requirements**:
+- Soft delete fields (`isDeleted`, `deletedAt`, `deletedBy`) must NOT have `@readonly` or similar restrictive annotations
+- Use `@UI.Hidden` instead to prevent UI modifications while allowing draft activation to work properly
+
 ## Limitations
 
 - **Composition vs Association**: Filter propagation only applies to Composition relationships. Association relationships are independent and do not propagate the `isDeleted` filter.
 - **OData V2 Compatibility**: OData V2 does not support `$filter` within `$expand`, so the parent's `isDeleted` filter is automatically propagated to Composition children.
 - **User-specified Filters**: When you explicitly specify `isDeleted` in an `$expand` filter (e.g., `$expand=items($filter=isDeleted eq true)`), the plugin respects your filter and does not add automatic filtering.
 - **Physical Deletion**: If physical deletion is required, you can implement custom logic to delete soft-deleted records (where `isDeleted = true`).
-- **Draft Edit Mode**: When deleting composition children in draft edit mode (e.g., deleting an OrderItem while editing an Order in Fiori Elements Object Page), the deletion results in a physical delete, not a soft delete. This is because CAP's draft activation process synchronizes draft data to active entities, and deleted draft items are not preserved. Soft delete works correctly when:
-  - Deleting active entities directly (not in edit mode)
-  - Deleting the parent entity (cascade soft delete to children)
 
 ## License
 

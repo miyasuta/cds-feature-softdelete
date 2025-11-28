@@ -95,19 +95,29 @@ public class SoftDeleteHandler implements EventHandler {
         deletionData.put(FIELD_IS_DELETED, true);
         deletionData.put(FIELD_DELETED_AT, now);
         deletionData.put(FIELD_DELETED_BY, userName);
+        // Include IsActiveEntity=false to target draft records
+        deletionData.put("IsActiveEntity", false);
 
-        DraftService draftService = (DraftService) context.getService();
+        // Use PersistenceService instead of DraftService.patchDraft to bypass @readonly restrictions
+        PersistenceService db = context.getServiceCatalog()
+            .getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
 
-        // Build the update query for draft entity (IsActiveEntity=false)
-        CqnUpdate update = Update.entity(targetEntity.getQualifiedName())
+        // Get draft table name (append _drafts suffix to service entity name)
+        String draftTableName = targetEntity.getQualifiedName() + "_drafts";
+
+        // Build the update query for draft entity
+        // Include IsActiveEntity=false in the matching condition
+        Map<String, Object> matchKeys = new HashMap<>(filteredKeys);
+        matchKeys.put("IsActiveEntity", false);
+
+        CqnUpdate update = Update.entity(draftTableName)
             .data(deletionData)
-            .matching(filteredKeys)
-            .where(CQL.get("IsActiveEntity").eq(false));
+            .matching(matchKeys);
 
-        draftService.patchDraft(update);
+        db.run(update);
 
         // Cascade soft delete to composition children in draft mode
-        softDeleteDraftCompositionChildren(context, draftService, targetEntity, filteredKeys, deletionData);
+        softDeleteDraftCompositionChildren(context, db, targetEntity, filteredKeys, deletionData);
 
         // Mark as completed and return success
         context.setResult(ResultBuilder.deletedRows(1).result());
@@ -186,9 +196,16 @@ public class SoftDeleteHandler implements EventHandler {
         String targetName = context.getTarget().getQualifiedName();
         CdsEntity entity = model.getEntity(targetName);
 
+        // Log all READ requests for debugging
+        logger.info("READ request for entity: {}, isDraftEntity: {}, endsWith_drafts: {}",
+            targetName,
+            entity != null && isDraftEntity(entity),
+            targetName.endsWith("_drafts"));
+
         // Skip filtering for draft entities (CAP draft activation needs to read soft-deleted draft records)
-        if (isDraftEntity(entity)) {
-            logger.debug("Skipping isDeleted filter for draft entity: {}", targetName);
+        // Check both: 1) Draft-enabled entity (has IsActiveEntity key), 2) Draft table (ends with _drafts)
+        if (isDraftEntity(entity) || targetName.endsWith("_drafts")) {
+            logger.info("Skipping isDeleted filter for draft entity: {}", targetName);
             return;
         }
 
@@ -600,9 +617,9 @@ public class SoftDeleteHandler implements EventHandler {
     }
 
     /**
-     * Recursively soft deletes composition children of a draft entity using DraftService.patchDraft.
+     * Recursively soft deletes composition children of a draft entity using PersistenceService.
      */
-    private void softDeleteDraftCompositionChildren(DraftCancelEventContext context, DraftService draftService,
+    private void softDeleteDraftCompositionChildren(DraftCancelEventContext context, PersistenceService db,
                                                      CdsEntity entity, Map<String, Object> parentKeys,
                                                      Map<String, Object> deletionData) {
         List<CdsElement> compositionElements = getCompositionElements(entity);
@@ -617,7 +634,7 @@ public class SoftDeleteHandler implements EventHandler {
             }
 
             try {
-                String childDbEntityName = childEntity.getQualifiedName();
+                String childDraftTableName = childEntity.getQualifiedName() + "_drafts";
 
                 // Extract foreign key name from the composition's on clause
                 String foreignKeyName = extractForeignKeyName(element, parentKeys);
@@ -631,25 +648,14 @@ public class SoftDeleteHandler implements EventHandler {
                 Object parentKeyValue = parentKeys.values().iterator().next();
 
                 // First, query draft children to get their keys for recursive cascade
-                CqnSelect childSelect = Select.from(childDbEntityName)
-                    .where(CQL.get(foreignKeyName).eq(parentKeyValue)
-                        .and(CQL.get("IsActiveEntity").eq(false)));
+                CqnSelect childSelect = Select.from(childDraftTableName)
+                    .where(CQL.get(foreignKeyName).eq(parentKeyValue));
 
-                PersistenceService db = context.getServiceCatalog()
-                    .getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
                 Result childrenResult = db.run(childSelect);
 
-                // Update draft children with soft delete data using patchDraft
-                CqnUpdate childUpdate = Update.entity(childDbEntityName)
-                    .data(deletionData)
-                    .where(CQL.get(foreignKeyName).eq(parentKeyValue)
-                        .and(CQL.get("IsActiveEntity").eq(false)));
-
-                draftService.patchDraft(childUpdate);
-
-                // Recursively handle nested compositions for each child
+                // For each child, update with soft delete data and recursively process
                 for (var child : childrenResult) {
-                    // Extract child's keys (excluding draft virtual keys)
+                    // Extract child's keys
                     Map<String, Object> childKeys = new HashMap<>();
                     for (String keyName : getEntityKeyNames(childEntity)) {
                         Object keyValue = child.get(keyName);
@@ -659,7 +665,24 @@ public class SoftDeleteHandler implements EventHandler {
                     }
 
                     if (!childKeys.isEmpty()) {
-                        softDeleteDraftCompositionChildren(context, draftService, childEntity, childKeys, deletionData);
+                        // Include IsActiveEntity=false in the matching condition
+                        Map<String, Object> childMatchKeys = new HashMap<>(childKeys);
+                        childMatchKeys.put("IsActiveEntity", false);
+
+                        // Extract deletionData without IsActiveEntity (only isDeleted, deletedAt, deletedBy)
+                        Map<String, Object> childDeletionData = new HashMap<>();
+                        childDeletionData.put(FIELD_IS_DELETED, deletionData.get(FIELD_IS_DELETED));
+                        childDeletionData.put(FIELD_DELETED_AT, deletionData.get(FIELD_DELETED_AT));
+                        childDeletionData.put(FIELD_DELETED_BY, deletionData.get(FIELD_DELETED_BY));
+
+                        CqnUpdate childUpdate = Update.entity(childDraftTableName)
+                            .data(childDeletionData)
+                            .matching(childMatchKeys);
+
+                        db.run(childUpdate);
+
+                        // Recursively handle nested compositions
+                        softDeleteDraftCompositionChildren(context, db, childEntity, childKeys, deletionData);
                     }
                 }
 

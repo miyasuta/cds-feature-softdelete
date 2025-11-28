@@ -1,7 +1,7 @@
 namespace io.github.miyasuta;
 
 aspect softdelete {
-    isDeleted: Boolean default false @readonly;
-    deletedAt: Timestamp @readonly;
-    deletedBy: String @readonly;
+    isDeleted: Boolean default false;
+    deletedAt: Timestamp;
+    deletedBy: String;
 }

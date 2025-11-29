@@ -185,7 +185,8 @@ public class SoftDeleteHandler implements EventHandler {
      * Skips filtering if:
      * - User explicitly specified isDeleted in their query
      * - Query is a by-key access (direct access to single entity)
-     * - Entity is a draft entity (ends with .drafts suffix)
+     * - Entity is a draft table (ends with _drafts suffix)
+     * - Query is for draft records (IsActiveEntity=false in query)
      */
     @Before(event = CqnService.EVENT_READ)
     public void beforeRead(CdsReadEventContext context) {
@@ -197,15 +198,23 @@ public class SoftDeleteHandler implements EventHandler {
         CdsEntity entity = model.getEntity(targetName);
 
         // Log all READ requests for debugging
-        logger.info("READ request for entity: {}, isDraftEntity: {}, endsWith_drafts: {}",
+        boolean isDraft = entity != null && isDraftEntity(entity);
+        boolean isQueryingDrafts = isDraft && isQueryingDraftRecords(select);
+        logger.info("READ request for entity: {}, isDraftEntity: {}, endsWith_drafts: {}, isQueryingDrafts: {}",
             targetName,
-            entity != null && isDraftEntity(entity),
-            targetName.endsWith("_drafts"));
+            isDraft,
+            targetName.endsWith("_drafts"),
+            isQueryingDrafts);
 
-        // Skip filtering for draft entities (CAP draft activation needs to read soft-deleted draft records)
-        // Check both: 1) Draft-enabled entity (has IsActiveEntity key), 2) Draft table (ends with _drafts)
-        if (isDraftEntity(entity) || targetName.endsWith("_drafts")) {
-            logger.info("Skipping isDeleted filter for draft entity: {}", targetName);
+        // Skip filtering for draft table (CAP draft activation needs to read soft-deleted draft records)
+        if (targetName.endsWith("_drafts")) {
+            logger.info("Skipping isDeleted filter for draft table: {}", targetName);
+            return;
+        }
+
+        // Skip filtering if query is for draft records (IsActiveEntity=false)
+        if (isQueryingDrafts) {
+            logger.info("Skipping isDeleted filter for draft records query: {}", targetName);
             return;
         }
 
@@ -218,28 +227,43 @@ public class SoftDeleteHandler implements EventHandler {
         // Check if this is by-key access (skip main entity filtering for direct key access)
         boolean isByKeyAccess = isByKeyAccess(select);
 
+        // Check if this is a navigation path (e.g., Orders(ID=...,IsActiveEntity=true)/items)
+        boolean isNavigationPath = isNavigationPath(select);
+
         // Check if user already specified isDeleted filter and get its value
         Boolean userIsDeletedValue = getIsDeletedValueFromWhere(select);
         boolean userSpecifiedIsDeleted = userIsDeletedValue != null;
 
-        // Determine the isDeleted value to use for expand filters
+        // Determine the isDeleted value to use for main entity and expand filters
+        Boolean mainIsDeletedValue;
         Boolean expandIsDeletedValue;
 
         if (isByKeyAccess) {
+            // By-key access: query parent's isDeleted value for expand filtering
             expandIsDeletedValue = getParentIsDeletedValue(context, select, entity);
+            mainIsDeletedValue = null; // Don't filter main entity for by-key access
+        } else if (isNavigationPath) {
+            // Navigation path: query parent's isDeleted value and apply to main entity
+            mainIsDeletedValue = getParentIsDeletedValueFromNavigation(context, select, model);
+            expandIsDeletedValue = mainIsDeletedValue;
+            logger.info("Navigation path detected, parent isDeleted={}", mainIsDeletedValue);
         } else if (userSpecifiedIsDeleted) {
             // User specified isDeleted filter, propagate that value to expands
             expandIsDeletedValue = userIsDeletedValue;
+            mainIsDeletedValue = null; // User already specified filter
         } else {
             // Default: filter for non-deleted entities
             expandIsDeletedValue = false;
+            mainIsDeletedValue = false;
         }
 
         // Determine if we should apply main entity filter
-        boolean applyMainFilter = !isByKeyAccess && !userSpecifiedIsDeleted;
+        boolean applyMainFilter = !isByKeyAccess && !userSpecifiedIsDeleted && mainIsDeletedValue != null;
 
-        // Add isDeleted = false filter for main entity
-        Predicate isDeletedFilter = CQL.get(FIELD_IS_DELETED).eq(false);
+        // Add isDeleted filter for main entity
+        final Boolean finalMainIsDeletedValue = mainIsDeletedValue;
+        Predicate isDeletedFilter = finalMainIsDeletedValue != null ?
+            CQL.get(FIELD_IS_DELETED).eq(finalMainIsDeletedValue) : null;
 
         // Final values for use in Modifier
         final Boolean finalExpandIsDeletedValue = expandIsDeletedValue;
@@ -247,8 +271,8 @@ public class SoftDeleteHandler implements EventHandler {
         CqnSelect modifiedSelect = CQL.copy(select, new Modifier() {
             @Override
             public Predicate where(Predicate where) {
-                if (!applyMainFilter) {
-                    return where; // Don't modify main filter for by-key access
+                if (!applyMainFilter || isDeletedFilter == null) {
+                    return where; // Don't modify main filter
                 }
                 if (where != null) {
                     return CQL.and(where, isDeletedFilter);
@@ -265,6 +289,87 @@ public class SoftDeleteHandler implements EventHandler {
         });
 
         context.setCqn(modifiedSelect);
+    }
+
+    /**
+     * Checks if this is a navigation path (e.g., Orders(ID=...,IsActiveEntity=true)/items).
+     * Navigation paths have multiple segments in the ref.
+     */
+    private boolean isNavigationPath(CqnSelect select) {
+        // Navigation path has more than one segment
+        // e.g., Orders(ID=1)/items has 2 segments: Orders and items
+        int segmentCount = select.ref().segments().size();
+        if (segmentCount > 1) {
+            // Check if the first segment has a filter (parent key access)
+            boolean hasParentFilter = select.ref().rootSegment().filter().isPresent();
+            if (hasParentFilter) {
+                logger.debug("Navigation path detected: {} segments with parent filter", segmentCount);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Gets the isDeleted value from the parent entity in a navigation path.
+     * For queries like Orders(ID=...,IsActiveEntity=true)/items, this queries the Order's isDeleted value.
+     */
+    private Boolean getParentIsDeletedValueFromNavigation(CdsReadEventContext context, CqnSelect select, CdsModel model) {
+        try {
+            // Get the parent segment (first segment in the navigation path)
+            var rootSegment = select.ref().rootSegment();
+            String parentEntityName = rootSegment.id();
+
+            // Get the parent entity
+            CdsEntity parentEntity = model.getEntity(parentEntityName);
+            if (parentEntity == null || !isSoftDeleteEnabled(parentEntity)) {
+                return false; // Parent not found or not soft-delete enabled
+            }
+
+            // Extract parent keys from the root segment filter
+            if (!rootSegment.filter().isPresent()) {
+                return false; // No filter on parent
+            }
+
+            // Use CqnAnalyzer to extract keys from the parent segment
+            CqnAnalyzer analyzer = CqnAnalyzer.create(model);
+            AnalysisResult analysisResult = analyzer.analyze(select.ref());
+            Map<String, Object> allKeys = new HashMap<>(analysisResult.rootKeys());
+
+            // Filter to get only parent entity keys
+            Map<String, Object> parentKeys = filterKeysForEntity(allKeys, parentEntity);
+            removeDraftKeys(parentKeys);
+
+            if (parentKeys.isEmpty()) {
+                return false; // No parent keys found
+            }
+
+            // Get the database entity name for the parent
+            String dbEntityName = getDbEntityName(parentEntity);
+
+            // Query the parent's isDeleted value
+            CqnSelect parentQuery = Select.from(dbEntityName)
+                .columns(CQL.get(FIELD_IS_DELETED))
+                .matching(parentKeys);
+
+            PersistenceService db = context.getServiceCatalog()
+                .getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
+            Result result = db.run(parentQuery);
+
+            if (result.rowCount() > 0) {
+                Object isDeletedObj = result.single().get(FIELD_IS_DELETED);
+                if (isDeletedObj instanceof Boolean) {
+                    Boolean isDeleted = (Boolean) isDeletedObj;
+                    logger.info("Parent entity {} isDeleted={}", parentEntityName, isDeleted);
+                    return isDeleted;
+                }
+            }
+
+            return false; // Default to false if not found
+        } catch (Exception e) {
+            logger.warn("Failed to get parent isDeleted value from navigation, defaulting to false", e);
+            return false;
+        }
     }
 
     /**
@@ -558,9 +663,23 @@ public class SoftDeleteHandler implements EventHandler {
 
     /**
      * Checks if a query is a by-key access (direct access using primary keys).
+     * Navigation paths (e.g., Orders(...)/items) should return false.
      */
     private boolean isByKeyAccess(CqnSelect select) {
-        return select.ref().rootSegment().filter().isPresent();
+        // Check if there's a filter on the root segment (potential by-key access)
+        if (!select.ref().rootSegment().filter().isPresent()) {
+            return false;
+        }
+
+        // Check if this is a navigation path (ref has more than one segment)
+        // e.g., Orders(ID=1)/items would have 2 segments
+        int segmentCount = select.ref().segments().size();
+        if (segmentCount > 1) {
+            logger.debug("Navigation path detected (ref segments: {}), not by-key access", segmentCount);
+            return false;
+        }
+
+        return true;
     }
 
     /**
@@ -596,6 +715,61 @@ public class SoftDeleteHandler implements EventHandler {
         return entity.elements()
             .filter(CdsElement::isKey)
             .anyMatch(element -> "IsActiveEntity".equals(element.getName()));
+    }
+
+    /**
+     * Checks if the query is specifically for draft records (IsActiveEntity=false).
+     * Returns true if the query contains IsActiveEntity=false in the WHERE clause or ref.
+     */
+    private boolean isQueryingDraftRecords(CqnSelect select) {
+        // Check WHERE clause
+        if (select.where().isPresent() && extractIsActiveEntityValue(select.where().get())) {
+            return true;
+        }
+
+        // Check if the ref contains IsActiveEntity=false (for navigation queries)
+        try {
+            if (select.ref() != null && select.ref().rootSegment() != null) {
+                var filter = select.ref().rootSegment().filter();
+                if (filter.isPresent()) {
+                    return extractIsActiveEntityValue(filter.get());
+                }
+            }
+        } catch (Exception e) {
+            logger.debug("Error checking IsActiveEntity in ref", e);
+        }
+
+        return false;
+    }
+
+    /**
+     * Recursively extracts the IsActiveEntity value from a predicate.
+     * Returns true if IsActiveEntity=false is found, false otherwise.
+     */
+    private boolean extractIsActiveEntityValue(CqnPredicate predicate) {
+        if (predicate instanceof com.sap.cds.ql.cqn.CqnComparisonPredicate) {
+            com.sap.cds.ql.cqn.CqnComparisonPredicate comparison =
+                (com.sap.cds.ql.cqn.CqnComparisonPredicate) predicate;
+
+            if (comparison.left().isRef()) {
+                String refName = comparison.left().asRef().lastSegment();
+                if ("IsActiveEntity".equals(refName) && comparison.right().isLiteral()) {
+                    Object value = comparison.right().asLiteral().value();
+                    // Return true only if IsActiveEntity=false (querying draft records)
+                    return Boolean.FALSE.equals(value);
+                }
+            }
+        } else if (predicate instanceof com.sap.cds.ql.cqn.CqnConnectivePredicate) {
+            com.sap.cds.ql.cqn.CqnConnectivePredicate connective =
+                (com.sap.cds.ql.cqn.CqnConnectivePredicate) predicate;
+
+            for (CqnPredicate p : connective.predicates()) {
+                if (extractIsActiveEntityValue(p)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     /**

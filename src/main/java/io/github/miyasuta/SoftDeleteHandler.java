@@ -562,10 +562,12 @@ public class SoftDeleteHandler implements EventHandler {
                     .where(CQL.get(foreignKeyName).eq(parentKeyValue));
                 Result childrenResult = db.run(childSelect);
 
-                // Update children with soft delete data
+                // Update children with soft delete data, but ONLY if they are not already deleted
+                // This prevents overwriting deletedAt/deletedBy metadata for items that were deleted earlier
                 CqnUpdate childUpdate = Update.entity(childDbEntityName)
                     .data(deletionData)
-                    .where(CQL.get(foreignKeyName).eq(parentKeyValue));
+                    .where(b -> b.get(foreignKeyName).eq(parentKeyValue)
+                              .and(b.get("isDeleted").eq(false)));
 
                 db.run(childUpdate);
 
@@ -829,6 +831,12 @@ public class SoftDeleteHandler implements EventHandler {
 
                 // For each child, update with soft delete data and recursively process
                 for (var child : childrenResult) {
+                    // Skip already deleted children to preserve their original deletion metadata
+                    Object isDeleted = child.get("isDeleted");
+                    if (isDeleted != null && (Boolean) isDeleted) {
+                        continue;
+                    }
+
                     // Extract child's keys
                     Map<String, Object> childKeys = new HashMap<>();
                     for (String keyName : getEntityKeyNames(childEntity)) {

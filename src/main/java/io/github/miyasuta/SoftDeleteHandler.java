@@ -50,8 +50,9 @@ public class SoftDeleteHandler implements EventHandler {
 
     /**
      * Intercepts draft cancel (delete) operations for draft-enabled entities.
-     * Converts physical delete to soft delete by updating draft entity with soft delete fields.
-     * This handler is triggered when deleting composition children in draft edit mode.
+     * This handler is triggered when deleting draft entities.
+     * Note: Draft root deletion (discard) should NOT be converted to soft delete - it should be physical delete.
+     * Only draft child deletions (composition children) should be converted to soft delete.
      */
     @On(event = DraftService.EVENT_DRAFT_CANCEL)
     @HandlerOrder(HandlerOrder.EARLY)
@@ -64,7 +65,18 @@ public class SoftDeleteHandler implements EventHandler {
             return;
         }
 
-        logger.debug("Draft cancel (soft delete) triggered for entity: {}", targetEntity.getQualifiedName());
+        // Check if this is a draft root deletion or a child deletion
+        // Draft root entities have @odata.draft.enabled annotation
+        boolean isDraftRoot = isDraftRootEntity(targetEntity);
+
+        if (isDraftRoot) {
+            logger.debug("Draft root discard detected for entity: {} - using physical delete",
+                targetEntity.getQualifiedName());
+            context.proceed();
+            return;
+        }
+
+        logger.debug("Draft child delete (soft delete) triggered for entity: {}", targetEntity.getQualifiedName());
 
         // Prepare soft delete data
         Instant now = Instant.now();
@@ -661,6 +673,19 @@ public class SoftDeleteHandler implements EventHandler {
         }
         Boolean annotationValue = entity.getAnnotationValue(ANNOTATION_SOFTDELETE_ENABLED, Boolean.FALSE);
         return Boolean.TRUE.equals(annotationValue);
+    }
+
+    /**
+     * Checks if an entity is a draft root entity (has @odata.draft.enabled annotation).
+     * Draft root entities should use physical delete when discarded.
+     * Draft child entities should use soft delete.
+     */
+    private boolean isDraftRootEntity(CdsEntity entity) {
+        if (entity == null) {
+            return false;
+        }
+        Boolean draftEnabled = entity.getAnnotationValue(ANNOTATION_DRAFT_ENABLED, Boolean.FALSE);
+        return Boolean.TRUE.equals(draftEnabled);
     }
 
     /**

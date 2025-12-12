@@ -23,6 +23,5 @@ buildNumber.properties
 Thumbs.db
 
 # Claude Code
-CLAUDE.md
 .mcp.json
 plan.md

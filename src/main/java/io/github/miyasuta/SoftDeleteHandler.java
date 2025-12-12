@@ -52,7 +52,9 @@ public class SoftDeleteHandler implements EventHandler {
      * Intercepts draft cancel (delete) operations for draft-enabled entities.
      * This handler is triggered when deleting draft entities.
      * Note: Draft root deletion (discard) should NOT be converted to soft delete - it should be physical delete.
-     * Only draft child deletions (composition children) should be converted to soft delete.
+     * For draft children:
+     * - If active entity exists (existing record): soft delete (set isDeleted=true)
+     * - If active entity does not exist (new record): physical delete (proceed with deletion)
      */
     @On(event = DraftService.EVENT_DRAFT_CANCEL)
     @HandlerOrder(HandlerOrder.EARLY)
@@ -76,14 +78,7 @@ public class SoftDeleteHandler implements EventHandler {
             return;
         }
 
-        logger.debug("Draft child delete (soft delete) triggered for entity: {}", targetEntity.getQualifiedName());
-
-        // Prepare soft delete data
-        Instant now = Instant.now();
-        String userName = context.getUserInfo().getName();
-        if (userName == null || userName.isEmpty()) {
-            userName = "system";
-        }
+        logger.debug("Draft child delete triggered for entity: {}", targetEntity.getQualifiedName());
 
         // Extract keys from the draft cancel CQN
         CqnAnalyzer analyzer = CqnAnalyzer.create(model);
@@ -100,6 +95,26 @@ public class SoftDeleteHandler implements EventHandler {
             logger.warn("Draft cancel request did not contain entity keys – skipping soft delete.");
             context.proceed();
             return;
+        }
+
+        // Check if active entity exists (to determine physical vs soft delete)
+        boolean activeEntityExists = checkActiveEntityExists(context, targetEntity, filteredKeys);
+
+        if (!activeEntityExists) {
+            // New draft child (never activated): use physical delete
+            logger.debug("Active entity does not exist for draft child - using physical delete");
+            context.proceed();
+            return;
+        }
+
+        // Existing draft child (previously activated): use soft delete
+        logger.debug("Active entity exists for draft child - using soft delete");
+
+        // Prepare soft delete data
+        Instant now = Instant.now();
+        String userName = context.getUserInfo().getName();
+        if (userName == null || userName.isEmpty()) {
+            userName = "system";
         }
 
         // Update draft entity with soft delete fields using DraftService.patchDraft
@@ -815,6 +830,40 @@ public class SoftDeleteHandler implements EventHandler {
         }
 
         return filtered;
+    }
+
+    /**
+     * Checks if an active entity exists for the given draft entity.
+     * Used to determine whether a draft child deletion should be physical (new record) or soft (existing record).
+     * @param context The draft cancel event context
+     * @param entity The draft entity
+     * @param keys The entity keys (without draft virtual keys)
+     * @return true if active entity exists, false otherwise
+     */
+    private boolean checkActiveEntityExists(DraftCancelEventContext context, CdsEntity entity, Map<String, Object> keys) {
+        try {
+            // Get the database entity name
+            String dbEntityName = getDbEntityName(entity);
+
+            // Query for active entity (without _drafts suffix, using entity keys only)
+            CqnSelect activeQuery = Select.from(dbEntityName)
+                .columns(CQL.get("ID")) // Just check existence, no need to fetch all columns
+                .matching(keys);
+
+            PersistenceService db = context.getServiceCatalog()
+                .getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
+
+            Result result = db.run(activeQuery);
+
+            boolean exists = result.rowCount() > 0;
+            logger.debug("Active entity check for {}: exists={}", entity.getQualifiedName(), exists);
+            return exists;
+
+        } catch (Exception e) {
+            logger.warn("Failed to check active entity existence, defaulting to soft delete", e);
+            // If we can't determine, safer to use soft delete (preserve data)
+            return true;
+        }
     }
 
     /**

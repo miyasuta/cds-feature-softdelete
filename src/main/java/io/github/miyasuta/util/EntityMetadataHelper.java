@@ -1,4 +1,4 @@
-package io.github.miyasuta;
+package io.github.miyasuta.util;
 
 import com.sap.cds.reflect.CdsAssociationType;
 import com.sap.cds.reflect.CdsElement;
@@ -12,7 +12,7 @@ import java.util.stream.Collectors;
  * Provides utility methods for checking entity annotations, extracting keys,
  * and finding relationships.
  */
-class EntityMetadataHelper {
+public class EntityMetadataHelper {
 
     private static final String ANNOTATION_SOFTDELETE_ENABLED = "@softdelete.enabled";
     private static final String ANNOTATION_DRAFT_ENABLED = "@odata.draft.enabled";
@@ -21,7 +21,7 @@ class EntityMetadataHelper {
     /**
      * Checks if an entity has the @softdelete.enabled annotation.
      */
-    static boolean isSoftDeleteEnabled(CdsEntity entity) {
+    public static boolean isSoftDeleteEnabled(CdsEntity entity) {
         if (entity == null) {
             return false;
         }
@@ -34,7 +34,7 @@ class EntityMetadataHelper {
      * Draft root entities should use physical delete when discarded.
      * Draft child entities should use soft delete.
      */
-    static boolean isDraftRootEntity(CdsEntity entity) {
+    public static boolean isDraftRootEntity(CdsEntity entity) {
         if (entity == null) {
             return false;
         }
@@ -47,7 +47,7 @@ class EntityMetadataHelper {
      * In CAP Java, draft entities are identified by the IsActiveEntity virtual key,
      * not by a .drafts suffix like in Node.js.
      */
-    static boolean isDraftEntity(CdsEntity entity) {
+    public static boolean isDraftEntity(CdsEntity entity) {
         if (entity == null) {
             return false;
         }
@@ -59,7 +59,7 @@ class EntityMetadataHelper {
     /**
      * Gets the underlying database entity name from a service entity.
      */
-    static String getDbEntityName(CdsEntity entity) {
+    public static String getDbEntityName(CdsEntity entity) {
         if (entity.query().isPresent()) {
             String source = entity.query().get().ref().firstSegment();
             if (source != null) {
@@ -72,7 +72,7 @@ class EntityMetadataHelper {
     /**
      * Gets the key names of an entity, excluding draft virtual keys.
      */
-    static List<String> getEntityKeyNames(CdsEntity entity) {
+    public static List<String> getEntityKeyNames(CdsEntity entity) {
         return entity.elements()
             .filter(CdsElement::isKey)
             .map(CdsElement::getName)
@@ -83,7 +83,7 @@ class EntityMetadataHelper {
     /**
      * Returns all composition elements of an entity.
      */
-    static List<CdsElement> getCompositionElements(CdsEntity entity) {
+    public static List<CdsElement> getCompositionElements(CdsEntity entity) {
         return entity.elements()
             .filter(element -> element.getType().isAssociation())
             .filter(element -> {
@@ -96,7 +96,7 @@ class EntityMetadataHelper {
     /**
      * Finds the target entity of an association element.
      */
-    static CdsEntity findTargetEntity(CdsEntity parentEntity, String associationName) {
+    public static CdsEntity findTargetEntity(CdsEntity parentEntity, String associationName) {
         if (parentEntity == null) {
             return null;
         }
@@ -113,7 +113,7 @@ class EntityMetadataHelper {
      * This is important for navigation path deletions (e.g., Orders(...)/items(...))
      * where keys contain both parent and child entity keys.
      */
-    static Map<String, Object> filterKeysForEntity(Map<String, Object> keys, CdsEntity entity) {
+    public static Map<String, Object> filterKeysForEntity(Map<String, Object> keys, CdsEntity entity) {
         Map<String, Object> filtered = new HashMap<>();
         List<String> entityKeyNames = getEntityKeyNames(entity);
 
@@ -129,7 +129,7 @@ class EntityMetadataHelper {
     /**
      * Removes draft-specific virtual keys from a map.
      */
-    static void removeDraftKeys(Map<String, Object> keys) {
+    public static void removeDraftKeys(Map<String, Object> keys) {
         DRAFT_VIRTUAL_KEYS.forEach(keys::remove);
     }
 
@@ -138,7 +138,7 @@ class EntityMetadataHelper {
      * For example, for composition "items" pointing to OrderItems with back-association "order",
      * it extracts "order_ID".
      */
-    static String extractForeignKeyName(CdsElement element, Map<String, Object> parentKeys) {
+    public static String extractForeignKeyName(CdsElement element, Map<String, Object> parentKeys) {
         CdsAssociationType assocType = (CdsAssociationType) element.getType();
         CdsEntity targetEntity = assocType.getTarget();
 

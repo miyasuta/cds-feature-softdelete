@@ -1,4 +1,4 @@
-package io.github.miyasuta;
+package io.github.miyasuta.util;
 
 import com.sap.cds.ql.cqn.CqnComparisonPredicate;
 import com.sap.cds.ql.cqn.CqnConnectivePredicate;
@@ -10,7 +10,7 @@ import org.slf4j.LoggerFactory;
 /**
  * Analyzes CQN queries to determine query characteristics and extract filter values.
  */
-class QueryAnalyzer {
+public class QueryAnalyzer {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryAnalyzer.class);
     private static final String FIELD_IS_DELETED = "isDeleted";
@@ -19,7 +19,7 @@ class QueryAnalyzer {
      * Checks if a query is a by-key access (direct access using primary keys).
      * Navigation paths (e.g., Orders(...)/items) should return false.
      */
-    static boolean isByKeyAccess(CqnSelect select) {
+    public static boolean isByKeyAccess(CqnSelect select) {
         // Check if there's a filter on the root segment (potential by-key access)
         if (!select.ref().rootSegment().filter().isPresent()) {
             return false;
@@ -39,7 +39,7 @@ class QueryAnalyzer {
      * Checks if this is a navigation path (e.g., Orders(ID=...,IsActiveEntity=true)/items).
      * Navigation paths have multiple segments in the ref.
      */
-    static boolean isNavigationPath(CqnSelect select) {
+    public static boolean isNavigationPath(CqnSelect select) {
         int segmentCount = select.ref().segments().size();
         if (segmentCount > 1) {
             // Check if the first segment has a filter (parent key access)
@@ -56,7 +56,7 @@ class QueryAnalyzer {
      * Extracts the isDeleted value from the WHERE clause if present.
      * Returns null if isDeleted is not specified, true/false if specified.
      */
-    static Boolean getIsDeletedValueFromWhere(CqnSelect select) {
+    public static Boolean getIsDeletedValueFromWhere(CqnSelect select) {
         if (!select.where().isPresent()) {
             return null;
         }
@@ -66,7 +66,7 @@ class QueryAnalyzer {
     /**
      * Recursively extracts the isDeleted value from a predicate.
      */
-    static Boolean extractIsDeletedValue(CqnPredicate predicate) {
+    public static Boolean extractIsDeletedValue(CqnPredicate predicate) {
         if (predicate instanceof CqnComparisonPredicate) {
             CqnComparisonPredicate comparison = (CqnComparisonPredicate) predicate;
 
@@ -96,7 +96,7 @@ class QueryAnalyzer {
      * Checks if the query is specifically for draft records (IsActiveEntity=false).
      * Returns true if the query contains IsActiveEntity=false in the WHERE clause or ref.
      */
-    static boolean isQueryingDraftRecords(CqnSelect select) {
+    public static boolean isQueryingDraftRecords(CqnSelect select) {
         // Check WHERE clause
         if (select.where().isPresent() && extractIsActiveEntityValue(select.where().get())) {
             return true;
@@ -121,7 +121,7 @@ class QueryAnalyzer {
      * Recursively extracts the IsActiveEntity value from a predicate.
      * Returns true if IsActiveEntity=false is found, false otherwise.
      */
-    static boolean extractIsActiveEntityValue(CqnPredicate predicate) {
+    public static boolean extractIsActiveEntityValue(CqnPredicate predicate) {
         if (predicate instanceof CqnComparisonPredicate) {
             CqnComparisonPredicate comparison = (CqnComparisonPredicate) predicate;
 

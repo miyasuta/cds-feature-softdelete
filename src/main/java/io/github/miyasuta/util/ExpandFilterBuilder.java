@@ -1,4 +1,4 @@
-package io.github.miyasuta;
+package io.github.miyasuta.util;
 
 import com.sap.cds.Result;
 import com.sap.cds.ql.CQL;
@@ -19,7 +19,7 @@ import java.util.stream.Collectors;
  * Builds filters for expand items in CQN queries.
  * Handles propagation of isDeleted values to nested associations.
  */
-class ExpandFilterBuilder {
+public class ExpandFilterBuilder {
 
     private static final Logger logger = LoggerFactory.getLogger(ExpandFilterBuilder.class);
     private static final String FIELD_IS_DELETED = "isDeleted";
@@ -27,7 +27,7 @@ class ExpandFilterBuilder {
     /**
      * Adds isDeleted filter to expand items if the target entity is soft-delete enabled.
      */
-    static CqnSelectListItem addFilterToExpandItem(CqnSelectListItem item, CdsModel model, CdsEntity parentEntity, Boolean expandIsDeletedValue) {
+    public static CqnSelectListItem addFilterToExpandItem(CqnSelectListItem item, CdsModel model, CdsEntity parentEntity, Boolean expandIsDeletedValue) {
         if (!item.isExpand()) {
             return item;
         }
@@ -79,7 +79,7 @@ class ExpandFilterBuilder {
     /**
      * Gets the isDeleted value from the parent entity for by-key access.
      */
-    static Boolean getParentIsDeletedValue(CdsReadEventContext context, CqnSelect select, CdsEntity entity) {
+    public static Boolean getParentIsDeletedValue(CdsReadEventContext context, CqnSelect select, CdsEntity entity) {
         try {
             // Extract keys from the select statement
             CdsModel model = context.getModel();
@@ -121,7 +121,7 @@ class ExpandFilterBuilder {
      * Gets the isDeleted value from the parent entity in a navigation path.
      * For queries like Orders(ID=...,IsActiveEntity=true)/items, this queries the Order's isDeleted value.
      */
-    static Boolean getParentIsDeletedValueFromNavigation(CdsReadEventContext context, CqnSelect select, CdsModel model) {
+    public static Boolean getParentIsDeletedValueFromNavigation(CdsReadEventContext context, CqnSelect select, CdsModel model) {
         try {
             // Get the parent segment (first segment in the navigation path)
             var rootSegment = select.ref().rootSegment();

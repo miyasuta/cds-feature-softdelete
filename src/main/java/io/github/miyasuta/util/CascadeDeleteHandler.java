@@ -1,4 +1,4 @@
-package io.github.miyasuta;
+package io.github.miyasuta.util;
 
 import com.sap.cds.Result;
 import com.sap.cds.ql.CQL;
@@ -20,7 +20,7 @@ import java.util.*;
 /**
  * Handles cascading soft delete operations for composition children.
  */
-class CascadeDeleteHandler {
+public class CascadeDeleteHandler {
 
     private static final Logger logger = LoggerFactory.getLogger(CascadeDeleteHandler.class);
     private static final String FIELD_IS_DELETED = "isDeleted";
@@ -30,8 +30,8 @@ class CascadeDeleteHandler {
     /**
      * Recursively soft deletes composition children of a given entity.
      */
-    static void softDeleteCompositionChildren(CdsDeleteEventContext context, CdsEntity entity,
-                                              Map<String, Object> parentKeys, Map<String, Object> deletionData) {
+    public static void softDeleteCompositionChildren(CdsDeleteEventContext context, CdsEntity entity,
+                                                     Map<String, Object> parentKeys, Map<String, Object> deletionData) {
         List<CdsElement> compositionElements = EntityMetadataHelper.getCompositionElements(entity);
         PersistenceService db = context.getServiceCatalog().getService(PersistenceService.class, PersistenceService.DEFAULT_NAME);
 
@@ -96,9 +96,9 @@ class CascadeDeleteHandler {
     /**
      * Recursively soft deletes composition children of a draft entity using PersistenceService.
      */
-    static void softDeleteDraftCompositionChildren(DraftCancelEventContext context, PersistenceService db,
-                                                   CdsEntity entity, Map<String, Object> parentKeys,
-                                                   Map<String, Object> deletionData) {
+    public static void softDeleteDraftCompositionChildren(DraftCancelEventContext context, PersistenceService db,
+                                                          CdsEntity entity, Map<String, Object> parentKeys,
+                                                          Map<String, Object> deletionData) {
         List<CdsElement> compositionElements = EntityMetadataHelper.getCompositionElements(entity);
 
         for (CdsElement element : compositionElements) {
@@ -180,7 +180,7 @@ class CascadeDeleteHandler {
      * Checks if an active entity exists for the given draft entity.
      * Used to determine whether a draft child deletion should be physical (new record) or soft (existing record).
      */
-    static boolean checkActiveEntityExists(DraftCancelEventContext context, CdsEntity entity, Map<String, Object> keys) {
+    public static boolean checkActiveEntityExists(DraftCancelEventContext context, CdsEntity entity, Map<String, Object> keys) {
         try {
             // Get the database entity name
             String dbEntityName = EntityMetadataHelper.getDbEntityName(entity);

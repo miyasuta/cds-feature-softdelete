@@ -269,15 +269,16 @@ public class SoftDeleteHandler implements EventHandler {
             // By-key access: query parent's isDeleted value for expand filtering
             expandIsDeletedValue = getParentIsDeletedValue(context, select, entity);
             mainIsDeletedValue = null; // Don't filter main entity for by-key access
+        } else if (userSpecifiedIsDeleted) {
+            // User specified isDeleted filter - ALWAYS prioritize user's explicit filter
+            // This applies to both regular queries and navigation paths
+            expandIsDeletedValue = userIsDeletedValue;
+            mainIsDeletedValue = null; // User already specified filter
         } else if (isNavigationPath) {
-            // Navigation path: query parent's isDeleted value and apply to main entity
+            // Navigation path without explicit user filter: query parent's isDeleted value and apply to main entity
             mainIsDeletedValue = getParentIsDeletedValueFromNavigation(context, select, model);
             expandIsDeletedValue = mainIsDeletedValue;
             logger.info("Navigation path detected, parent isDeleted={}", mainIsDeletedValue);
-        } else if (userSpecifiedIsDeleted) {
-            // User specified isDeleted filter, propagate that value to expands
-            expandIsDeletedValue = userIsDeletedValue;
-            mainIsDeletedValue = null; // User already specified filter
         } else {
             // Default: filter for non-deleted entities
             expandIsDeletedValue = false;

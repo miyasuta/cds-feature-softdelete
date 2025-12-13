@@ -156,7 +156,10 @@ public class SoftDeleteHandler implements EventHandler {
         // Extract keys from the DELETE CQN
         CqnAnalyzer analyzer = CqnAnalyzer.create(model);
         AnalysisResult analysisResult = analyzer.analyze(context.getCqn());
-        Map<String, Object> keys = new HashMap<>(analysisResult.rootKeys());
+
+        // Use targetKeys for navigation paths, rootKeys for direct access
+        Map<String, Object> targetKeys = analysisResult.targetKeys();
+        Map<String, Object> keys = targetKeys != null ? new HashMap<>(targetKeys) : new HashMap<>(analysisResult.rootKeys());
         EntityMetadataHelper.removeDraftKeys(keys);
 
         // Get the underlying database entity name

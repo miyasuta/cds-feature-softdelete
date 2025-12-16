@@ -8,7 +8,12 @@ import com.sap.cds.ql.Update;
 import com.sap.cds.ql.cqn.CqnSelect;
 import com.sap.cds.ql.cqn.CqnSelectListItem;
 import com.sap.cds.ql.cqn.CqnUpdate;
+import com.sap.cds.ql.cqn.CqnStructuredTypeRef;
+import com.sap.cds.ql.cqn.CqnElementRef;
+import com.sap.cds.ql.cqn.CqnValue;
 import com.sap.cds.ql.cqn.Modifier;
+import com.sap.cds.ql.RefBuilder;
+import com.sap.cds.ql.StructuredTypeRef;
 import com.sap.cds.reflect.CdsEntity;
 import com.sap.cds.reflect.CdsModel;
 import com.sap.cds.ql.cqn.AnalysisResult;
@@ -195,6 +200,12 @@ public class SoftDeleteHandler implements EventHandler {
         String targetName = context.getTarget().getQualifiedName();
         CdsEntity entity = model.getEntity(targetName);
 
+        // ISSUE-009: Rewrite isDeletedDisplay references to isDeleted BEFORE early returns
+        // This needs to happen for: WHERE clause, rootSegment filter, targetSegment filter
+        // Navigation path queries have $filter in targetSegment, not WHERE
+        select = rewriteIsDeletedDisplayInSelect(select);
+        context.setCqn(select);
+
         // Skip filtering for draft table (CAP draft activation needs to read soft-deleted draft records)
         if (targetName.endsWith("_drafts")) {
             return;
@@ -258,6 +269,8 @@ public class SoftDeleteHandler implements EventHandler {
         CqnSelect modifiedSelect = CQL.copy(select, new Modifier() {
             @Override
             public Predicate where(Predicate where) {
+                // isDeletedDisplay has already been rewritten to isDeleted at the beginning of beforeRead
+
                 if (!applyMainFilter || isDeletedFilter == null) {
                     return where;
                 }
@@ -276,6 +289,59 @@ public class SoftDeleteHandler implements EventHandler {
         });
 
         context.setCqn(modifiedSelect);
+    }
+
+    /**
+     * Rewrites isDeletedDisplay references in a CqnSelect.
+     * Handles WHERE clause and ref segment filters (for navigation paths).
+     * ISSUE-009: Support isDeletedDisplay filter conditions
+     */
+    private CqnSelect rewriteIsDeletedDisplayInSelect(CqnSelect select) {
+        // Use CQL.copy with Modifier to rewrite isDeletedDisplay references in WHERE clause
+        // The $filter parameter from navigation paths is converted to WHERE clause by CAP runtime
+        return CQL.copy(select, new Modifier() {
+            @Override
+            public Predicate where(Predicate where) {
+                Predicate rewritten = rewriteIsDeletedDisplayReferences(where);
+                if (rewritten != where) {
+                    logger.debug("Rewrote isDeletedDisplay filter to isDeleted in WHERE clause");
+                }
+                return rewritten;
+            }
+        });
+    }
+
+    /**
+     * Rewrites isDeletedDisplay references in predicates to isDeleted.
+     * This allows users to filter by isDeletedDisplay while the plugin uses the internal isDeleted field.
+     * ISSUE-009: Support isDeletedDisplay filter conditions
+     */
+    private Predicate rewriteIsDeletedDisplayReferences(Predicate predicate) {
+        if (predicate == null) {
+            return null;
+        }
+
+        return CQL.copy(predicate, new Modifier() {
+            @Override
+            public CqnStructuredTypeRef ref(CqnStructuredTypeRef ref) {
+                String lastSegment = ref.lastSegment();
+                if ("isDeletedDisplay".equals(lastSegment)) {
+                    // Replace isDeletedDisplay with isDeleted
+                    return (CqnStructuredTypeRef) CQL.get(FIELD_IS_DELETED);
+                }
+                return ref;
+            }
+
+            @Override
+            public CqnValue ref(CqnElementRef ref) {
+                String lastSegment = ref.lastSegment();
+                if ("isDeletedDisplay".equals(lastSegment)) {
+                    // Replace isDeletedDisplay with isDeleted
+                    return CQL.get(FIELD_IS_DELETED);
+                }
+                return ref;
+            }
+        });
     }
 
     /**

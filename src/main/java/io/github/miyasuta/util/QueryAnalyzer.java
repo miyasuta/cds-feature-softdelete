@@ -14,6 +14,7 @@ public class QueryAnalyzer {
 
     private static final Logger logger = LoggerFactory.getLogger(QueryAnalyzer.class);
     private static final String FIELD_IS_DELETED = "isDeleted";
+    private static final String FIELD_IS_DELETED_DISPLAY = "isDeletedDisplay";
 
     /**
      * Checks if a query is a by-key access (direct access using primary keys).
@@ -65,6 +66,7 @@ public class QueryAnalyzer {
 
     /**
      * Recursively extracts the isDeleted value from a predicate.
+     * Also checks for isDeletedDisplay field (ISSUE-009).
      */
     public static Boolean extractIsDeletedValue(CqnPredicate predicate) {
         if (predicate instanceof CqnComparisonPredicate) {
@@ -72,7 +74,9 @@ public class QueryAnalyzer {
 
             if (comparison.left().isRef()) {
                 String refName = comparison.left().asRef().lastSegment();
-                if (FIELD_IS_DELETED.equals(refName) && comparison.right().isLiteral()) {
+                // Check for both isDeleted and isDeletedDisplay fields (ISSUE-009)
+                if ((FIELD_IS_DELETED.equals(refName) || FIELD_IS_DELETED_DISPLAY.equals(refName))
+                    && comparison.right().isLiteral()) {
                     Object value = comparison.right().asLiteral().value();
                     if (value instanceof Boolean) {
                         return (Boolean) value;

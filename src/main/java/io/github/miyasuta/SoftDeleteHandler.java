@@ -219,17 +219,15 @@ public class SoftDeleteHandler implements EventHandler {
 
         // Analyze query characteristics
         boolean isByKeyAccess = QueryAnalyzer.isByKeyAccess(select);
+        boolean isNavigationPath = QueryAnalyzer.isNavigationPath(select);
 
-        // ISSUE-010: Skip filtering only for draft by-key access
+        // ISSUE-010 & ISSUE-011: Draft by-key access special handling
         // Draft activation needs to read soft-deleted records for by-key access (e.g., Orders(ID=...,IsActiveEntity=false))
-        // But draft list queries (e.g., Orders?$filter=IsActiveEntity eq false) should still filter isDeleted=false
+        // - Skip main entity filtering (to allow reading soft-deleted draft for activation)
+        // - But still apply expand filtering (to exclude soft-deleted children from $expand, per R1 rule)
         boolean isDraft = entity != null && EntityMetadataHelper.isDraftEntity(entity);
         boolean isQueryingDrafts = isDraft && QueryAnalyzer.isQueryingDraftRecords(select);
-        if (isQueryingDrafts && isByKeyAccess) {
-            logger.debug("Draft by-key access detected - skipping isDeleted filter for draft activation");
-            return;
-        }
-        boolean isNavigationPath = QueryAnalyzer.isNavigationPath(select);
+        boolean isDraftByKeyAccess = isQueryingDrafts && isByKeyAccess;
 
         // Check if user already specified isDeleted filter
         Boolean userIsDeletedValue = QueryAnalyzer.getIsDeletedValueFromWhere(select);
@@ -258,7 +256,13 @@ public class SoftDeleteHandler implements EventHandler {
         }
 
         // Determine if we should apply main entity filter
+        // ISSUE-011: For draft by-key access, skip main entity filter but still apply expand filter below
         boolean applyMainFilter = !isByKeyAccess && !userSpecifiedIsDeleted && mainIsDeletedValue != null;
+
+        // Log filtering decisions for debugging
+        if (isDraftByKeyAccess) {
+            logger.debug("Draft by-key access: skip main filter, apply expand filter with isDeleted={}", expandIsDeletedValue);
+        }
 
         // Build isDeleted filter for main entity
         final Boolean finalMainIsDeletedValue = mainIsDeletedValue;

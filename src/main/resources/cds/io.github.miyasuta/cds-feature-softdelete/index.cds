@@ -5,7 +5,7 @@ aspect softdelete {
     deletedAt: Timestamp @UI.Hidden;
     deletedBy: String @UI.Hidden;
     // For display purposes (type explicitly specified to reset annotation inheritance)
-    isDeletedDisplay: Boolean = isDeleted;
-    deletedAtDisplay: Timestamp = deletedAt;
-    deletedByDisplay: String = deletedBy;
+    isDeletedDisplay: Boolean = isDeleted @readonly;
+    deletedAtDisplay: Timestamp = deletedAt @readonly;
+    deletedByDisplay: String = deletedBy @readonly;
 }

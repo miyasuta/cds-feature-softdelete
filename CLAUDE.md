@@ -13,13 +13,13 @@
 ```bash
 cd /home/miyasuta/projects/cds-softdelete-plugin-java/cds-feature-softdelete && \
 JAVA_HOME=/usr/lib/jvm/sapmachine-jdk-21.0.4 mvn clean install -DskipTests && \
-cd ../cds-softdelete-test && \
+cd ../spec-test && \
 JAVA_HOME=/usr/lib/jvm/sapmachine-jdk-21.0.4 mvn test
 ```
 
 ### Run Specific Test
 ```bash
-cd /home/miyasuta/projects/cds-softdelete-plugin-java/cds-softdelete-test
+cd /home/miyasuta/projects/cds-softdelete-plugin-java/spec-test
 JAVA_HOME=/usr/lib/jvm/sapmachine-jdk-21.0.4 mvn test -Dtest=OrderDraftServiceTest#navigationToItemsShouldFilterDeletedRecords
 ```
 

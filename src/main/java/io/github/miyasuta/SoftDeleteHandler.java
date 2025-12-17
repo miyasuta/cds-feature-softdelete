@@ -211,13 +211,6 @@ public class SoftDeleteHandler implements EventHandler {
             return;
         }
 
-        // Skip filtering if query is for draft records (IsActiveEntity=false)
-        boolean isDraft = entity != null && EntityMetadataHelper.isDraftEntity(entity);
-        boolean isQueryingDrafts = isDraft && QueryAnalyzer.isQueryingDraftRecords(select);
-        if (isQueryingDrafts) {
-            return;
-        }
-
         if (entity == null || !EntityMetadataHelper.isSoftDeleteEnabled(entity)) {
             return;
         }
@@ -226,6 +219,16 @@ public class SoftDeleteHandler implements EventHandler {
 
         // Analyze query characteristics
         boolean isByKeyAccess = QueryAnalyzer.isByKeyAccess(select);
+
+        // ISSUE-010: Skip filtering only for draft by-key access
+        // Draft activation needs to read soft-deleted records for by-key access (e.g., Orders(ID=...,IsActiveEntity=false))
+        // But draft list queries (e.g., Orders?$filter=IsActiveEntity eq false) should still filter isDeleted=false
+        boolean isDraft = entity != null && EntityMetadataHelper.isDraftEntity(entity);
+        boolean isQueryingDrafts = isDraft && QueryAnalyzer.isQueryingDraftRecords(select);
+        if (isQueryingDrafts && isByKeyAccess) {
+            logger.debug("Draft by-key access detected - skipping isDeleted filter for draft activation");
+            return;
+        }
         boolean isNavigationPath = QueryAnalyzer.isNavigationPath(select);
 
         // Check if user already specified isDeleted filter

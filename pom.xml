@@ -4,7 +4,7 @@
   <groupId>io.github.miyasuta</groupId>
   <artifactId>cds-feature-softdelete</artifactId>
   <packaging>jar</packaging>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0</version>
   <name>cds-feature-softdelete</name>
   <description>CAP CDS plugin for soft delete functionality</description>
   <url>https://github.com/miyasuta/cds-feature-softdelete</url>

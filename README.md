@@ -120,11 +120,13 @@ GET /Orders?$filter=isDeleted eq true
 
 ## Draft Support
 
-Soft delete works in draft mode (Fiori Elements Object Page). Note that in draft edit mode, deleted items may remain visible until the draft is activated. This is expected behavior to ensure proper synchronization.
+Soft delete works seamlessly in draft mode (Fiori Elements Object Page):
+- Deleted items are automatically filtered out in draft lists and expansions
+- Draft activation correctly synchronizes soft delete status to active entities
+- Navigation paths properly respect soft delete filters
 
 ## Limitations
 
-- **Draft Edit Mode**: Deleted items remain visible in draft edit mode until the draft is activated
 - **Field Protection**: Cannot use `@readonly` on soft delete fields due to CAP Java draft activation constraints (use `*Display` fields for UI instead)
 
 ## License
